@@ -97,7 +97,7 @@ def send_to_slack(title, owner_info):
         
     try:
         # 创建消息内容 - 按照新格式
-        # 格式: "Case 01590054 - Medium - People Yun\nOwner: Warner Chen <@U07GJ9QLC2Y>"
+        # 格式: "Case 01590054 - Medium - Customer's Company\nOwner: Tom Li <@U02345ABCD1234>"
         name = owner_info['name']
         staff_id = owner_info['id']
         
