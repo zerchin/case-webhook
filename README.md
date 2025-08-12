@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS `support_list` (
 
 ## 插入数据
 INSERT INTO support_list (name,id, status, created_at, updated_at)
-VALUES ('Tom Li', 'online', NOW(), NOW());
+VALUES ('Tom Li', 'U02345ABCD1234', 'online', NOW(), NOW());
 
 ## 更新数据
 UPDATE support_list
@@ -67,7 +67,12 @@ docker run -d --name webhook-receiver \
 
 5. Slack 创建工作流
 使用 Webhook，并设置自定义参数 message，当触发时转发到 channel 即可。
-
+当触发 Webhook 之后，发送的数据格式如下：
+```
+Case 01590054 - Medium - Customer's Company
+Owner: Tom Li <@U02345ABCD1234>
+```
+这里使用`<@user_id>`的方式实现艾特的功能，但是工作流貌似无法渲染出来，实际在 channel 里还是看到 ID，不过不影响艾特的功能。
 
 6. 请假设置
 通过在对应时间点，设置 support 的 status 为 online 或者 offline。
