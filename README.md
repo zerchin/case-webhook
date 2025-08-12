@@ -75,6 +75,7 @@ Owner: Tom Li <@U02345ABCD1234>
 这里使用`<@user_id>`的方式实现艾特的功能，但是工作流貌似无法渲染出来，实际在 channel 里还是看到 ID，不过不影响艾特的功能。
 
 6. 请假设置
+
 通过在对应时间点，设置 support 的 status 为 online 或者 offline。
 ```bash
 ## 首先安装 at 工具
