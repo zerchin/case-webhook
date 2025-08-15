@@ -59,7 +59,7 @@ docker run -d --name webhook-receiver \
 {
   "event": {
     "data": {
-      "title": "Case 01590054 - Medium - Customer's Company",
+      "title": "Case 01590054 - Medium - Customer‘s Company"
     }
   }
 }
