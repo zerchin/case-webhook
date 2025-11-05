@@ -26,6 +26,14 @@ CREATE TABLE IF NOT EXISTS `support_list` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+## 新增 cases 表
+CREATE TABLE IF NOT EXISTS `cases` (
+  `id` VARCHAR(30) NOT NULL COMMENT 'id',
+  `support_name` VARCHAR(30) NOT NULL COMMENT '姓名',
+  `support_id` VARCHAR(20) NOT NULL COMMENT 'ID',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 ## 插入数据
 INSERT INTO support_list (name,id, status, created_at, updated_at)
@@ -39,18 +47,18 @@ WHERE name = 'Tom Li';
 
 3. 创建 Webhook 服务器
 ```bash
-docker run -d --name webhook-receiver \
+docker run -d \
   -p 80:5000 \
-  -e SLACK_WEBHOOK_URL=<WEBHOOK_URL> \
-  -e DB_HOST=<DB_HOST> \
-  -e DB_USER=<DB_USER> \
-  -e DB_PASSWORD=<DB_PSWD> \
-  -e DB_DATABASE="case_system" \
+  -e MYSQL_HOST=192.168.2.68 \
+  -e MYSQL_USER=root \
+  -e MYSQL_PASSWORD=123456 \
+  -e MYSQL_DB=case_system \
+  -e SLACK_Webhook_URL="https://SLACK_WEBHOOK_URL" \
   -e PORT=5000 \
-  -e LOG_LEVEL=DEBUG \
-  -e DEFAULT_OWNER_NAME="fallback_user" \
-  -e DEFAULT_OWNER_ID="U00000000" \
-  zerchin/case-webhook:v0.2
+  --name webhook-receiver-v3 \
+  zerchin/case-webhook:v0.3
+
+## 国内拉取地址：docker.1ms.run
 ```
 替换其中数据库配置和 Slack Webhook 地址。
 
@@ -74,7 +82,24 @@ Owner: Tom Li <@U02345ABCD1234>
 ```
 这里使用`<@user_id>`的方式实现艾特的功能，但是工作流貌似无法渲染出来，实际在 channel 里还是看到 ID，不过不影响艾特的功能。
 
-6. 请假设置
+6. 重复请求验证：
+```
+## 插入数据
+INSERT INTO cases (id, support_name, support_id, created_at)
+VALUES ('01590054', 'Tom Li', 'U02345ABCD1234', NOW());
+
+## 请求
+curl -X POST -H "Content-Type: application/json"  http://CASE_WEBHOOK_URL -d '{
+  "event": {
+    "data": {
+      "title": "Case 01603866 - Medium - Customer's Company"
+    }
+  }
+}'
+```
+
+
+7. 请假设置
 
 通过在对应时间点，设置 support 的 status 为 online 或者 offline。
 ```bash
