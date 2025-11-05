@@ -1,203 +1,219 @@
-from flask import Flask, request, jsonify
-import requests
-import pymysql
-from datetime import datetime
 import os
 import logging
 import json
+import re
+import pymysql
+import requests
+from flask import Flask, request, jsonify
+from datetime import datetime
+import time
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger('WebhookReceiver')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# 从环境变量获取配置
-SLACK_WEBHOOK_URL = os.getenv('SLACK_WEBHOOK_URL')
-PORT = int(os.getenv('PORT', '5000'))  # 默认端口 5000
-
-# MySQL 数据库配置从环境变量获取
-DB_CONFIG = {
-    'host': os.getenv('DB_HOST'),
-    'user': os.getenv('DB_USER'),
-    'password': os.getenv('DB_PASSWORD'),
-    'database': os.getenv('DB_DATABASE', 'case_system'),
-    'charset': 'utf8mb4',
-    'cursorclass': pymysql.cursors.DictCursor
-}
-
-def get_and_update_owner():
-    """获取 updated_at 最早的在线支持人员并更新其时间，返回 name 和 id"""
-    try:
-        logger.info("Connecting to database to get support staff...")
-        connection = pymysql.connect(**DB_CONFIG)
-        with connection:
-            with connection.cursor() as cursor:
-                # 获取 updated_at 最早的在线支持人员（包括 name 和 id）
-                sql = """
-                SELECT name, id 
-                FROM support_list 
-                WHERE status = 'online'
-                ORDER BY updated_at ASC 
-                LIMIT 1
-                FOR UPDATE
-                """
-                logger.debug(f"Executing SQL query: {sql}")
-                cursor.execute(sql)
-                result = cursor.fetchone()
-                
-                if not result:
-                    logger.warning("No online support staff found. Using fallback owner.")
-                    # 返回默认值（name 和 id）
-                    return {
-                        'name': os.getenv('DEFAULT_OWNER_NAME', 'user01'),
-                        'id': os.getenv('DEFAULT_OWNER_ID', '')
-                    }
-                
-                name = result['name']
-                staff_id = result['id']
-                logger.info(f"Selected support staff: {name} (ID: {staff_id})")
-                
-                # 更新该支持人员的 updated_at 时间
-                update_sql = """
-                UPDATE support_list 
-                SET updated_at = %s 
-                WHERE name = %s
-                """
-                current_time = datetime.now()
-                logger.debug(f"Executing update: {update_sql} with params: ({current_time}, {name})")
-                cursor.execute(update_sql, (current_time, name))
-                connection.commit()
-                
-                logger.info(f"Updated timestamp for {name} to {current_time}")
-                return {
-                    'name': name,
-                    'id': staff_id
-                }
-                
-    except Exception as e:
-        logger.error(f"Database error: {str(e)}", exc_info=True)
-        # 返回默认值（name 和 id）
-        return {
-            'name': os.getenv('DEFAULT_OWNER_NAME', 'user01'),
-            'id': os.getenv('DEFAULT_OWNER_ID', '')
-        }
-
-def send_to_slack(title, owner_info):
-    """向 Slack 发送消息，使用新的格式"""
-    if not SLACK_WEBHOOK_URL:
-        logger.error("Slack Webhook URL not configured. Skipping Slack notification.")
-        return False
+class DatabaseManager:
+    def __init__(self):
+        self.host = os.getenv('MYSQL_HOST', '192.168.2.65')
+        self.user = os.getenv('MYSQL_USER', 'root')
+        self.password = os.getenv('MYSQL_PASSWORD', '123456')
+        self.database = os.getenv('MYSQL_DB', 'case')
         
-    try:
-        # 创建消息内容 - 按照新格式
-        # 格式: "Case 01590054 - Medium - Customer's Company\nOwner: Tom Li <@U02345ABCD1234>"
-        name = owner_info['name']
-        staff_id = owner_info['id']
-        
-        # 如果 staff_id 不为空，添加 Slack mention 格式
-        owner_str = f"{name} <@{staff_id}>" if staff_id else name
-        
-        message = f"{title}\nOwner: {owner_str}"
-        logger.info(f"Preparing Slack message: {message}")
-        
-        # 构建 Slack 请求负载
-        payload = {"message": message}
-        
-        # 记录发送前的详细信息
-        logger.info(f"Sending to Slack webhook: {SLACK_WEBHOOK_URL}")
-        logger.debug(f"Slack payload: {json.dumps(payload)}")
-        
-        # 发送请求到 Slack
-        response = requests.post(SLACK_WEBHOOK_URL, json=payload)
-        
-        # 记录响应详细信息
-        logger.debug(f"Slack response status: {response.status_code}")
-        logger.debug(f"Slack response text: {response.text}")
-        
-        # 检查响应状态
-        if response.status_code == 200:
-            logger.info(f"Successfully sent to Slack: {message}")
-            return True
-        else:
-            logger.error(f"Failed to send to Slack. Status: {response.status_code}, Response: {response.text}")
+    def get_connection(self):
+        return pymysql.connect(
+            host=self.host,
+            user=self.user,
+            password=self.password,
+            database=self.database,
+            charset='utf8mb4',
+            cursorclass=pymysql.cursors.DictCursor
+        )
+    
+    def case_exists(self, case_id):
+        """检查case是否已存在"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    sql = "SELECT id FROM cases WHERE id = %s"
+                    cursor.execute(sql, (case_id,))
+                    return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"检查case存在性时出错: {e}")
             return False
     
-    except Exception as e:
-        logger.error(f"Error sending to Slack: {str(e)}", exc_info=True)
+    def get_oldest_online_support(self):
+        """获取updated_at最早的在线support"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    sql = """
+                    SELECT name, id, status 
+                    FROM support_list 
+                    WHERE status = 'online' 
+                    ORDER BY updated_at ASC 
+                    LIMIT 1
+                    """
+                    cursor.execute(sql)
+                    return cursor.fetchone()
+        except Exception as e:
+            logger.error(f"获取support时出错: {e}")
+            return None
+    
+    def insert_case(self, case_id, support_name, support_id):
+        """插入新的case记录"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 插入case
+                    sql_case = """
+                    INSERT INTO cases (id, support_name, support_id, created_at) 
+                    VALUES (%s, %s, %s, NOW())
+                    """
+                    cursor.execute(sql_case, (case_id, support_name, support_id))
+                    
+                    # 更新support的updated_at时间
+                    sql_support = """
+                    UPDATE support_list 
+                    SET updated_at = NOW() 
+                    WHERE id = %s
+                    """
+                    cursor.execute(sql_support, (support_id,))
+                    
+                    conn.commit()
+                    logger.info(f"成功插入case {case_id} 并更新support {support_id}")
+                    return True
+        except Exception as e:
+            logger.error(f"插入case时出错: {e}")
+            return False
+
+class SlackNotifier:
+    def __init__(self):
+        self.webhook_url = os.getenv('SLACK_Webhook_URL')
+    
+    def send_message(self, message, max_retries=3):
+        """发送消息到Slack，带重试机制"""
+        if not self.webhook_url:
+            logger.error("SLACK_Webhook_URL 未配置")
+            return False
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    self.webhook_url,
+                    json={'message': message},
+                    headers={'Content-Type': 'application/json'},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    logger.info(f"Slack消息发送成功 (第{attempt + 1}次尝试)")
+                    return True
+                else:
+                    logger.warning(f"Slack返回错误状态码: {response.status_code} (第{attempt + 1}次尝试)")
+            
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"发送Slack消息失败: {e} (第{attempt + 1}次尝试)")
+            
+            # 如果不是最后一次尝试，等待后重试
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # 指数退避
+        
+        logger.error(f"Slack消息发送失败，已重试{max_retries}次")
         return False
+
+def extract_case_id(title):
+    """从title中提取case id"""
+    # 匹配类似 "Case 01590054 - Medium - People Yun" 的格式
+    match = re.search(r'Case\s+(\d+)', title)
+    if match:
+        return match.group(1)
+    return None
 
 @app.route('/5c2df3d1-3371-47bd-a9cf-1983e9adc18b', methods=['POST'])
 def webhook_receiver():
+    """Webhook接收器"""
     try:
-        # 记录接收到的原始请求
-        logger.info("Received webhook request")
-        logger.debug(f"Request headers: {dict(request.headers)}")
+        # 记录接收到的请求
+        logger.info("收到Webhook请求")
         
-        # 获取 JSON 数据
+        # 解析JSON数据
         data = request.get_json()
-        
         if not data:
-            logger.warning("No data received in webhook request")
-            return jsonify({"error": "No data received"}), 400
+            logger.error("无法解析JSON数据")
+            return jsonify({'error': 'Invalid JSON'}), 400
         
-        # 记录完整的请求数据（调试级别）
-        logger.debug(f"Full request data: {json.dumps(data, indent=2)}")
+        # 提取title
+        title = data.get('event', {}).get('data', {}).get('title', '')
+        logger.info(f"提取到title: {title}")
         
-        # 提取 title 字段 (event.data.title)
-        event_data = data.get('event', {}).get('data', {})
-        title = event_data.get('title', 'N/A')
+        # 提取case id
+        case_id = extract_case_id(title)
+        if not case_id:
+            logger.error(f"无法从title中提取case id: {title}")
+            return jsonify({'error': 'Cannot extract case id from title'}), 400
         
-        # 记录标题信息
-        logger.info(f"Extracted title from webhook: {title}")
+        logger.info(f"提取到case id: {case_id}")
         
-        # 从数据库获取并更新支持人员
-        logger.info("Processing owner assignment...")
-        owner_info = get_and_update_owner()  # 现在返回包含 name 和 id 的字典
+        # 初始化数据库管理器
+        db = DatabaseManager()
         
-        # 创建处理后的数据对象
-        processed_data = {
-            "title": title,
-            "owner_name": owner_info['name'],
-            "owner_id": owner_info['id']
-        }
+        # 检查case是否已存在
+        if db.case_exists(case_id):
+            logger.info(f"case {case_id} 已存在，跳过处理")
+            return jsonify({'status': 'skipped', 'reason': 'case already exists'}), 200
         
-        # 输出到控制台
-        logger.info(f"Processed data: {processed_data}")
+        # 获取最早的在线support
+        support = db.get_oldest_online_support()
+        if not support:
+            logger.error("没有找到在线的support")
+            return jsonify({'error': 'No online support found'}), 500
         
-        # 发送到 Slack
-        logger.info("Sending to Slack...")
-        slack_success = send_to_slack(title, owner_info)
+        support_name = support['name']
+        support_id = support['id']
         
-        # 记录最终结果
-        logger.info(f"Webhook processing completed. Slack sent: {slack_success}")
+        logger.info(f"分配到support: {support_name} ({support_id})")
         
-        return jsonify({
-            "status": "success",
-            "processed_data": processed_data,
-            "slack_sent": slack_success
-        }), 200
-    
+        # 插入新的case记录并更新support时间
+        if not db.insert_case(case_id, support_name, support_id):
+            logger.error("插入case记录失败")
+            return jsonify({'error': 'Failed to insert case record'}), 500
+        
+        # 发送Slack通知
+        slack = SlackNotifier()
+        message = f"{title}\nOwner: {support_name} <@{support_id}>"
+        
+        if slack.send_message(message):
+            logger.info("Slack通知发送成功")
+            return jsonify({
+                'status': 'success', 
+                'case_id': case_id,
+                'support_name': support_name,
+                'support_id': support_id
+            }), 200
+        else:
+            logger.error("Slack通知发送失败")
+            return jsonify({
+                'status': 'partial_success',
+                'message': 'Case processed but Slack notification failed',
+                'case_id': case_id,
+                'support_name': support_name,
+                'support_id': support_id
+            }), 207  # 207 Multi-Status
+
     except Exception as e:
-        logger.error(f"Error processing request: {str(e)}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"处理Webhook时发生错误: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """健康检查端点"""
-    logger.info("Health check received")
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
+    return jsonify({'status': 'healthy'}), 200
 
 if __name__ == '__main__':
-    # 记录启动信息
-    logger.info(f"Starting webhook receiver on port {PORT}")
-    logger.info(f"Database configuration: {DB_CONFIG}")
-    logger.info(f"Slack webhook configured: {bool(SLACK_WEBHOOK_URL)}")
-    
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    port = int(os.getenv('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
