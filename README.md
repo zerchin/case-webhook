@@ -164,7 +164,7 @@ curl -X POST -H "Content-Type: application/json"  http://CASE_WEBHOOK_URL -d '{
 
 ```bash
 docker run -d \
-  --name case-webhook-uiv-4 \
+  --name case-webhook-ui-v4 \
   -p 8080:3000 \
   -e ADMIN_PASSWORD=123456 \
   -e DB_HOST=192.168.2.68 \
