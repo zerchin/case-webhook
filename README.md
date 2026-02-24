@@ -33,7 +33,7 @@ docker run -d \
   -e MYSQL_DB=case_system \
   -e SLACK_Webhook_URL="https://SLACK_WEBHOOK_URL" \
   -e PORT=5000 \
-  --name webhook-receiver-v3 \
+  --name case-webhook-v5 \
   zerchin/case-webhook:v0.5
 ```
 
@@ -164,7 +164,7 @@ curl -X POST -H "Content-Type: application/json"  http://CASE_WEBHOOK_URL -d '{
 
 ```bash
 docker run -d \
-  --name case-webhook-ui \
+  --name case-webhook-uiv-4 \
   -p 8080:3000 \
   -e ADMIN_PASSWORD=123456 \
   -e DB_HOST=192.168.2.68 \
