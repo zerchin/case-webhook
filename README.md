@@ -56,7 +56,7 @@ docker run -d \
   -e SLACK_Webhook_URL="https://SLACK_WEBHOOK_URL" \
   -e PORT=5000 \
   --name webhook-receiver-v3 \
-  zerchin/case-webhook:v0.3
+  zerchin/case-webhook:v0.4
 
 ## 国内拉取地址：docker.1ms.run
 ```
@@ -108,10 +108,25 @@ curl -X POST -H "Content-Type: application/json"  http://CASE_WEBHOOK_URL -d '{
 
 ## 例如请假 2025/08/11 - 2025/08/15
 ## 则在 08/11 这天设置为 offline
-echo "docker exec -it mysql-env mysql -uroot -p<MYSQL_PASSWORD> -e \"use case_system;UPDATE support_list SET status = 'offline' WHERE name = 'Tom Li';\" "|  at 00:00 2025-08-11
+echo "mysql -uroot -p<MYSQL_PASSWORD> -e \"use case_system;UPDATE support_list SET status = 'offline' WHERE name = 'Tom Li';\" "|  at 00:00 2025-08-11
 
 
 ## 在 08/16 这天 设置为online
-echo "docker exec -it mysql-env mysql -uroot -p<MYSQL_PASSWORD> -e \"use case_system;UPDATE support_list SET status = 'online' WHERE name = 'Tom Li';\" "|  at 00:00 2025-08-16
+echo "mysql -uroot -p<MYSQL_PASSWORD> -e \"use case_system;UPDATE support_list SET status = 'online' WHERE name = 'Tom Li';\" "|  at 00:00 2025-08-16
 
+```
+
+## UI
+
+```bash
+docker run -d \
+  --name case-webhook-ui \
+  -p 8080:3000 \
+  -e ADMIN_PASSWORD=123456 \
+  -e DB_HOST=192.168.2.68 \
+  -e DB_USER=root \
+  -e DB_PASSWORD=123456 \
+  -e DB_DATABASE=case_system \
+  -e WEBHOOK_URL="http://192.168.2.68/5c2df3d1-3371-47bd-a9cf-1983e9adc18b" \
+  zerchin/case-webhook-ui:v0.3
 ```
