@@ -95,7 +95,7 @@ class SlackNotifier:
     def __init__(self):
         self.webhook_url = os.getenv('SLACK_Webhook_URL')
     
-    def send_message(self, message, max_retries=3):
+    def send_message(self, message, max_retries=15):
         """发送消息到Slack，带重试机制"""
         if not self.webhook_url:
             logger.error("SLACK_Webhook_URL 未配置")
