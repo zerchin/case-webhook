@@ -2,6 +2,9 @@ import os
 import logging
 import json
 import re
+import hashlib
+import hmac
+import ipaddress
 import pymysql
 import requests
 from flask import Flask, request, jsonify
@@ -15,7 +18,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+WEBHOOK_PATH_PATTERN = re.compile(r'^/webhooks/pd/v3/[0-9a-f]{64}$')
+
+
+def load_webhook_path():
+    """从环境变量读取并校验 Webhook 路径，配置错误时拒绝启动。"""
+    webhook_path = os.getenv('WEBHOOK_PATH', '')
+    if not WEBHOOK_PATH_PATTERN.fullmatch(webhook_path):
+        raise RuntimeError(
+            'WEBHOOK_PATH must use /webhooks/pd/v3/<64 lowercase hex characters>'
+        )
+    return webhook_path
+
+
+WEBHOOK_PATH = load_webhook_path()
 app = Flask(__name__)
+
+SENSITIVE_HEADERS = {
+    'authorization',
+    'cookie',
+    'proxy-authorization',
+    'set-cookie',
+    'x-api-key',
+    'x-pagerduty-signature',
+}
 
 class DatabaseManager:
     def __init__(self):
@@ -180,7 +206,7 @@ class SlackNotifier:
 
 def extract_case_id(title):
     """从title中提取case id"""
-    # 匹配类似 "Case 01590054 - Medium - People Yun" 的格式
+    # 匹配类似 "Case 01590054 - Medium - Customer‘s Company" 的格式
     match = re.search(r'Case\s+(\d+)', title)
     if match:
         return match.group(1)
@@ -192,22 +218,143 @@ def extract_field(data, field):
     return val
 
 
-@app.route('/5c2df3d1-3371-47bd-a9cf-1983e9adc18b', methods=['POST'])
+def verify_pagerduty_signature(payload, signature_header, secret):
+    """验证 PagerDuty V3 Webhook 的 HMAC-SHA256 签名。"""
+    if not payload or not signature_header or not secret:
+        return False
+
+    expected_signature = "v1=" + hmac.new(
+        secret.encode('utf-8'),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+
+    # PagerDuty 在轮换 secret 时可能会发送多个逗号分隔的签名。
+    signatures = (signature.strip() for signature in signature_header.split(','))
+    return any(
+        hmac.compare_digest(expected_signature, signature)
+        for signature in signatures
+        if signature.startswith('v1=')
+    )
+
+
+def get_safe_request_headers(headers):
+    """返回用于日志的 Header，保留所有名称并脱敏认证信息。"""
+    return {
+        name: '[REDACTED]' if name.lower() in SENSITIVE_HEADERS else value
+        for name, value in headers.items()
+    }
+
+
+def log_webhook_request(raw_payload):
+    """以单行 JSON 记录 Webhook 请求详情，避免 Body 中的换行伪造日志条目。"""
+    request_details = {
+        'remote_ip': request.remote_addr,
+        'method': request.method,
+        'path': request.path,
+        'headers': get_safe_request_headers(request.headers),
+        'body': raw_payload.decode('utf-8', errors='replace'),
+    }
+    logger.info(
+        "Webhook 请求详情: %s",
+        json.dumps(request_details, ensure_ascii=False, separators=(',', ':'))
+    )
+
+
+def is_supplement_request(data):
+    """仅将布尔 true 或字符串 true 识别为 supplement 请求。"""
+    supplement = data.get('event', {}).get('data', {}).get('supplement', False)
+    return supplement is True or (
+        isinstance(supplement, str) and supplement.lower() == 'true'
+    )
+
+
+def is_trusted_supplement_source(remote_ip, trusted_ips):
+    """检查 supplement 请求来源 IP 是否在配置的 IP/CIDR 白名单中。"""
+    if not remote_ip or not trusted_ips:
+        return False
+
+    try:
+        source_ip = ipaddress.ip_address(remote_ip)
+    except ValueError:
+        logger.warning("Supplement 请求的连接端 IP 无效: %s", remote_ip)
+        return False
+
+    for entry in trusted_ips.split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if source_ip in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            logger.error("SUPPLEMENT_TRUSTED_IPS 包含无效配置: %s", entry)
+
+    return False
+
+
+@app.route(WEBHOOK_PATH, methods=['POST'])
 def webhook_receiver():
     """Webhook接收器"""
     try:
         # 记录接收到的请求
         logger.info("收到Webhook请求")
-        
-        # 解析JSON数据
-        data = request.get_json()
+
+        # 先读取未经解析或重新编码的原始请求体，供日志和签名校验共用。
+        raw_payload = request.get_data(cache=True)
+        log_webhook_request(raw_payload)
+
+        data = request.get_json(silent=True)
         if not data:
-            logger.error("无法解析JSON数据")
+            logger.error("无法解析JSON数据，请求 IP: %s", request.remote_addr)
             return jsonify({'error': 'Invalid JSON'}), 400
+
+        pagerduty_secret = os.getenv('PAGERDUTY_WEBHOOK_SECRET')
+        signature_header = request.headers.get('X-PagerDuty-Signature', '')
+        has_valid_pagerduty_signature = verify_pagerduty_signature(
+            raw_payload,
+            signature_header,
+            pagerduty_secret
+        )
+
+        if is_supplement_request(data):
+            trusted_ips = os.getenv('SUPPLEMENT_TRUSTED_IPS', '')
+            if has_valid_pagerduty_signature:
+                logger.info("Supplement 请求已通过 PagerDuty 签名校验")
+            elif is_trusted_supplement_source(request.remote_addr, trusted_ips):
+                logger.info(
+                    "Supplement 请求已通过来源 IP 白名单校验: %s",
+                    request.remote_addr
+                )
+            else:
+                logger.warning(
+                    "拒绝未授权的 Supplement 请求，请求 IP: %s",
+                    request.remote_addr
+                )
+                return jsonify({'error': 'Untrusted supplement source'}), 403
+        else:
+            if not pagerduty_secret:
+                logger.critical("PAGERDUTY_WEBHOOK_SECRET 未配置，已拒绝 PagerDuty Webhook 请求")
+                return jsonify({'error': 'Webhook signature verification is not configured'}), 503
+
+            if not signature_header:
+                logger.warning(
+                    "拒绝缺少 X-PagerDuty-Signature 的 Webhook 请求，请求 IP: %s",
+                    request.remote_addr
+                )
+                return jsonify({'error': 'Missing webhook signature'}), 400
+
+            if not has_valid_pagerduty_signature:
+                logger.warning(
+                    "拒绝 PagerDuty 签名无效的 Webhook 请求，请求 IP: %s",
+                    request.remote_addr
+                )
+                return jsonify({'error': 'Invalid webhook signature'}), 403
 
 
         # 判断是否 supplement
-        supplement = extract_field(data, 'supplement')
+        supplement = is_supplement_request(data)
+        logger.info("提取到supplement: %s", supplement)
         if not supplement:
             logger.info(f"获取到 PagerDuty 请求")
 
@@ -315,18 +462,14 @@ def webhook_receiver():
             logger.info("Slack通知发送成功")
             return jsonify({
                 'status': 'success', 
-                'case_id': case_id,
-                'support_name': support_name,
-                'support_id': support_id
+                'case_id': case_id
             }), 200
         else:
             logger.error("Slack通知发送失败")
             return jsonify({
                 'status': 'partial_success',
                 'message': 'Case processed but Slack notification failed',
-                'case_id': case_id,
-                'support_name': support_name,
-                'support_id': support_id
+                'case_id': case_id
             }), 207  # 207 Multi-Status
 
 
