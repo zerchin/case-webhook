@@ -12,11 +12,11 @@
   <aside class="sidebar">
     <a class="brand" href="/support"><span class="brand-icon" aria-hidden="true">c<span>.</span></span><span>case webhook</span></a>
     <nav aria-label="Main navigation">
-      <a href="/support" class="{{ 'active' if page == 'support' }}"><span aria-hidden="true">◉</span>Support</a>
-      <a href="/cases" class="{{ 'active' if page == 'cases' }}"><span aria-hidden="true">▤</span>Cases</a>
-      <a href="/settings" class="{{ 'active' if page == 'settings' }}"><span aria-hidden="true">⚙</span>Settings</a>
+      <a href="/support" class="{{ 'active' if page == 'support' }}">Support</a>
+      <a href="/cases" class="{{ 'active' if page == 'cases' }}">Cases</a>
+      <a href="/settings" class="{{ 'active' if page == 'settings' }}">Settings</a>
     </nav>
-    <div class="sidebar-bottom"><div class="profile"><span class="avatar">A</span><div>admin<small>Administrator</small></div><span class="version">v0.6</span></div><button id="logout" class="quiet">Sign out <span aria-hidden="true">↗</span></button></div>
+    <div class="sidebar-bottom"><div class="profile"><span class="avatar">A</span><div>admin<small>Administrator</small></div><span class="version">v0.7</span></div><button id="logout" class="quiet">Sign out <span aria-hidden="true">↗</span></button></div>
   </aside>
   <div class="workspace-main">
     <main>
@@ -46,12 +46,18 @@
           <input type="password" id="pd-secret" name="pagerduty_webhook_secret" autocomplete="new-password" placeholder="Enter your signing secret" maxlength="8192">
           <label class="check"><input id="clear-secret" type="checkbox">Clear saved signing secret</label>
         </div></section>
+        <section class="settings-section"><div><h2>PagerDuty API</h2></div><div class="form-stack">
+          <label for="pd-token">PAGERDUTY_API_TOKEN <span id="token-state" class="config-state"></span></label>
+          <input type="password" id="pd-token" name="pagerduty_api_token" autocomplete="new-password" placeholder="Enter your API token" maxlength="8192">
+          <label class="check"><input id="clear-token" type="checkbox">Clear saved API token</label>
+          <p class="field-hint">Used to read incident and email details. If details are unavailable, notifications use the incident title and default case URL.</p>
+        </div></section>
         <div class="settings-footer"><button type="submit" class="primary" id="save-settings" disabled>Save settings</button></div>
       </form>
       {% endif %}
     </main>
   </div>
   <div id="row-menu" class="row-menu" role="menu" aria-label="Row actions" hidden></div>
-  <dialog id="modal"><form id="modal-form"><div class="modal-heading"><div><p class="eyebrow">CASE WEBHOOK</p><h2 id="modal-title"></h2></div><button id="close-modal" type="button" class="icon-button" aria-label="Close dialog">×</button></div><div id="modal-fields" class="form-stack"></div><div id="modal-error" class="notice error" role="alert" hidden></div><div class="modal-footer"><button id="cancel-modal" type="button" class="secondary">Cancel</button><button id="modal-submit" class="primary" type="submit">Save changes</button></div></form></dialog>
+  <dialog id="modal"><form id="modal-form"><div class="modal-heading"><h2 id="modal-title"></h2><button id="close-modal" type="button" class="icon-button" aria-label="Close dialog">×</button></div><div id="modal-fields" class="form-stack"></div><div id="modal-error" class="notice error" role="alert" hidden></div><div class="modal-footer"><button id="cancel-modal" type="button" class="secondary">Cancel</button><button id="modal-submit" class="primary" type="submit">Save changes</button></div></form></dialog>
 </body>
 </html>

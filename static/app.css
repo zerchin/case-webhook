@@ -80,13 +80,6 @@ button:focus-visible,a:focus-visible,summary:focus-visible {
   line-height:1.6;
   margin:8px 0 0;
 }
-.eyebrow {
-  font-size:10px;
-  letter-spacing:1.8px;
-  color:#7e8b83;
-  font-weight:650;
-  margin:0 0 13px;
-}
 h1 {
   font-size:32px;
   letter-spacing:-1.2px;
@@ -493,6 +486,15 @@ label>input,label>select {
   flex-direction:column;
   gap:18px;
 }
+.case-advanced summary {
+  cursor:pointer;
+  font-size:12px;
+  font-weight:550;
+  color:#52664f;
+}
+.case-advanced .form-stack {
+  margin-top:16px;
+}
 .form-stack>label+input {
   margin-top:-9px;
 }
@@ -563,10 +565,6 @@ dialog::backdrop {
 .modal-heading h2 {
   font-size:23px;
   letter-spacing:-.6px;
-}
-.modal-heading .eyebrow {
-  font-size:9px;
-  margin-bottom:8px;
 }
 .modal-footer {
   display:flex;
@@ -841,9 +839,6 @@ dialog::backdrop {
   .page-heading>.primary {
     font-size:11px;
     padding:10px;
-  }
-  .eyebrow {
-    font-size:8px;
   }
 }
 @media(prefers-reduced-motion:reduce) {

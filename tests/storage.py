@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pymysql
 
-from database import DatabaseManager
+from database import DEFAULT_CASE_URL, DatabaseManager
 
 sqlite3.register_converter('DATETIME', lambda value: datetime.fromisoformat(value.decode()))
 
@@ -23,7 +23,11 @@ class Cursor:
         self.cursor.close()
 
     def execute(self, sql, params=()):
+        if 'information_schema.COLUMNS' in sql:
+            sql = 'SELECT name AS COLUMN_NAME FROM pragma_table_info(?) WHERE name = ?'
         sql = re.sub(r'\s+FOR UPDATE\b', '', sql).replace('%s', '?')
+        sql = re.sub(r'\) ENGINE=InnoDB.*$', ')', sql, flags=re.DOTALL)
+        sql = sql.replace("ENUM('online','offline')", 'TEXT').replace('INSERT IGNORE', 'INSERT OR IGNORE')
         try:
             self.cursor.execute(sql, params)
         except sqlite3.IntegrityError as error:
@@ -78,9 +82,6 @@ class TestDatabase(DatabaseManager):
             ''')
         self.initialize()
 
-    def initialize(self):
-        self.migrate_webhook_secret()
-
     def get_connection(self):
         return Connection(self.path)
 
@@ -92,11 +93,11 @@ class TestDatabase(DatabaseManager):
                             (name, support_id, status, priority, updated_at, '2020-01-01 00:00:00'))
             conn.commit()
 
-    def seed_case(self, case_id='001', support_id='A', name='Support A'):
+    def seed_case(self, case_id='001', support_id='A', name='Support A', url=DEFAULT_CASE_URL):
         with self.get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute('INSERT INTO cases VALUES (%s,%s,%s,%s)',
-                            (case_id, name, support_id, '2020-01-01 00:00:00'))
+                cur.execute('INSERT INTO cases (id, support_name, support_id, url, created_at) VALUES (%s,%s,%s,%s,%s)',
+                            (case_id, name, support_id, url, '2020-01-01 00:00:00'))
             conn.commit()
 
     def cleanup(self):

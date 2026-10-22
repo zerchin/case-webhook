@@ -5,13 +5,16 @@ import json
 import os
 import unittest
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import requests
 
 from werkzeug.security import generate_password_hash
 
 import app as server
-from database import DomainError, SECRET_STORAGE_PREFIX, decode_webhook_secret, encode_webhook_secret
+from database import DEFAULT_CASE_URL, DomainError, SECRET_STORAGE_PREFIX, decode_webhook_secret, encode_webhook_secret
 from storage import TestDatabase
+from test_pagerduty import CASE_URL, EMAIL_BODY, EXPECTED_MESSAGE, INCIDENT_URL, responses
 
 TEST_WEBHOOK_PATH = '/webhooks/pd/v3/test-token'
 
@@ -48,7 +51,8 @@ class ApiTests(unittest.TestCase):
                 return cur.fetchone()['pagerduty_webhook_secret']
 
     def webhook(self, details=None, signature=True, path=TEST_WEBHOOK_PATH):
-        payload = json.dumps({'event': {'data': details or {'title': 'Case 001 - Medium - Account'}}}).encode()
+        payload = json.dumps({'event': {'data': details or {
+            'title': 'Case 001 - Medium - Account', 'self': INCIDENT_URL}}}).encode()
         headers = {'X-PagerDuty-Signature': sign(payload)} if signature else {}
         return self.client.post(path, data=payload, content_type='application/json', headers=headers)
 
@@ -128,11 +132,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn('extra', self.client.get('/api/support').json[0])
 
     def test_settings_use_database_only_and_mask_credentials(self):
-        with patch.dict(os.environ, {'WEBHOOK_PATH': '/env-path', 'PAGERDUTY_WEBHOOK_SECRET': 'env-secret', 'SLACK_Webhook_URL': 'https://env.example'}):
+        with patch.dict(os.environ, {'WEBHOOK_PATH': '/env-path', 'PAGERDUTY_WEBHOOK_SECRET': 'env-secret',
+                                    'SLACK_Webhook_URL': 'https://env.example', 'PAGERDUTY_API_TOKEN': 'env-token'}):
             response = self.client.get('/api/settings')
             self.assertEqual(response.json['webhook_path'], TEST_WEBHOOK_PATH)
             self.assertNotIn('test-secret', response.text)
             self.assertNotIn('slack.example', response.text)
+            self.assertFalse(response.json['pagerduty_api_token_configured'])
+            self.assertEqual(self.db.settings()['pagerduty_api_token'], '')
             response = self.client.put('/api/settings', json={'webhook_path': '/webhooks/pd/v3/old-uuid-address'}, headers=self.headers)
             self.assertEqual(response.status_code, 200)
             self.assertEqual(self.db.settings()['pagerduty_webhook_secret'], 'test-secret')
@@ -260,14 +267,82 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(decode_webhook_secret(encode_webhook_secret(secret)), secret)
 
     @patch('app.SlackNotifier.send_message', return_value=True)
-    def test_automatic_case_uses_existing_queue_and_message(self, notify):
+    def test_ui_case_notification_uses_three_lines_and_existing_queue(self, notify):
         self.db.seed_support()
         response = self.post('/api/cases', {'id': '001', 'account_name': 'Acme'})
         self.assertEqual(response.status_code, 201)
-        notify.assert_called_once_with('Case 001 - Medium - Acme\nOwner: Support A <@A>')
+        notify.assert_called_once_with('Case: 001\nPriority: Medium\nAccount: Acme', DEFAULT_CASE_URL, 'A')
         self.assertEqual(self.client.get('/api/cases').json[0]['support_id'], 'A')
+        self.assertEqual(self.client.get('/api/cases').json[0]['url'], DEFAULT_CASE_URL)
         self.assertEqual(self.post('/api/cases', {'id': '001', 'account_name': 'Acme'}).status_code, 409)
         self.assertEqual(notify.call_count, 1)
+
+    @patch('app.SlackNotifier.send_message', return_value=True)
+    def test_ui_advanced_fields_enrich_message_and_save_only_url(self, notify):
+        self.db.seed_support(); self.db.seed_support('B', 'Support B', status='offline')
+        response = self.post('/api/cases', {'id': '001', 'account_name': '客户公司', 'priority': 'High',
+                                          'subject': '  controller plane组件流量分析  ',
+                                          'product': 'SUSE Rancher Prime: RKE2', 'url': CASE_URL})
+        self.assertEqual(response.status_code, 201)
+        notify.assert_called_once_with('Case: 001\nPriority: High\nSubject: controller plane组件流量分析\n'
+                                      'Account: 客户公司\nProduct: SUSE Rancher Prime: RKE2', CASE_URL, 'A')
+        case = self.client.get('/api/cases').json[0]
+        self.assertEqual(case['url'], CASE_URL)
+        self.assertNotIn('subject', case)
+        self.assertNotIn('product', case)
+        self.assertEqual(self.post('/api/cases/001/reassign', {'support_id': 'B'}).status_code, 200)
+        notify.assert_called_with('Case: 001\nNote: Backfilled case, Owner Changed From Support A to Support B',
+                                  CASE_URL, 'B')
+
+    @patch('app.SlackNotifier.send_message', return_value=True)
+    def test_ui_advanced_fields_are_individually_optional(self, notify):
+        self.db.seed_support()
+        examples = [({'subject': '组件分析'}, 'Case: 001\nPriority: Medium\nSubject: 组件分析\nAccount: Acme'),
+                    ({'product': 'RKE2'}, 'Case: 002\nPriority: Medium\nAccount: Acme\nProduct: RKE2'),
+                    ({'subject': ' ', 'product': '', 'url': ' '}, 'Case: 003\nPriority: Medium\nAccount: Acme')]
+        for index, (extra, message) in enumerate(examples, 1):
+            with self.subTest(extra=extra):
+                response = self.post('/api/cases', {'id': f'{index:03}', 'account_name': 'Acme', **extra})
+                self.assertEqual(response.status_code, 201)
+                notify.assert_called_with(message, DEFAULT_CASE_URL, 'A')
+
+    @patch('app.SlackNotifier.send_message')
+    def test_ui_notification_disabled_saves_url_and_ignores_subject_product(self, notify):
+        self.db.seed_support(status='offline')
+        before = self.db.list_rows('support_list')
+        response = self.post('/api/cases', {'id': '001', 'notify': False, 'support_id': 'A',
+                                          'subject': 'Subject not saved', 'product': 'Product not saved', 'url': CASE_URL})
+        self.assertEqual(response.status_code, 201)
+        case = self.client.get('/api/cases').json[0]
+        self.assertEqual(case['url'], CASE_URL)
+        self.assertNotIn('subject', case)
+        self.assertNotIn('product', case)
+        self.assertEqual(self.db.list_rows('support_list'), before)
+        notify.assert_not_called()
+
+    def test_manual_case_url_is_validated_even_without_notification(self):
+        self.db.seed_support(status='offline')
+        for url in ('javascript:alert(1)', 'https://', None):
+            with self.subTest(url=url):
+                response = self.post('/api/cases', {'id': '001', 'notify': False, 'support_id': 'A', 'url': url})
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.db.list_rows('cases'), [])
+        response = self.post('/api/cases', {'id': '001', 'notify': False, 'support_id': 'A', 'url': ''})
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(self.db.list_rows('cases')[0]['url'], DEFAULT_CASE_URL)
+
+    def test_ui_invalid_advanced_values_do_not_change_queue(self):
+        self.db.seed_support(priority=101)
+        before = self.db.list_rows('support_list')
+        for extra in ({'subject': None}, {'subject': 'x' * 1001}, {'product': []}, {'product': 'x' * 256},
+                      {'url': False}, {'url': 'x' * 2049}, {'url': 'javascript:alert(1)'},
+                      {'url': 'https://'}, {'url': 'https://example.com:invalid/'},
+                      {'url': 'https://user:password@example.com/'}, {'url': 'https://example.com/a b'}):
+            with self.subTest(extra=extra):
+                response = self.post('/api/cases', {'id': '001', 'account_name': 'Acme', **extra})
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.db.list_rows('cases'), [])
+        self.assertEqual(self.db.list_rows('support_list'), before)
 
     @patch('app.SlackNotifier.send_message')
     def test_manual_case_needs_only_id_and_offline_support(self, notify):
@@ -276,6 +351,7 @@ class ApiTests(unittest.TestCase):
         response = self.post('/api/cases', {'id': '002', 'notify': False, 'support_id': 'A'})
         self.assertEqual(response.status_code, 201)
         self.assertEqual(self.db.list_rows('support_list'), before)
+        self.assertEqual(self.db.list_rows('cases')[0]['url'], DEFAULT_CASE_URL)
         notify.assert_not_called()
 
     def test_case_validation_and_no_online_support(self):
@@ -305,7 +381,139 @@ class ApiTests(unittest.TestCase):
         self.assertEqual({row['id']: row['priority'] for row in people}, {'A': 101, 'B': 99})
         self.assertEqual({row['id']: row['updated_at'] for row in people}, before)
         self.assertEqual(self.db.list_rows('cases')[0]['support_id'], 'B')
-        notify.assert_called_once()
+        notify.assert_called_once_with('Case: 001\nNote: Backfilled case, Owner Changed From Support A to Support B',
+                                     DEFAULT_CASE_URL, 'B')
+
+    @patch('app.SlackNotifier.send_message', return_value=True)
+    def test_reassign_uses_saved_case_url_historical_owner_and_new_support_uid(self, notify):
+        self.db.seed_support(); self.db.seed_support('B', 'Support B')
+        self.db.seed_case(url=CASE_URL)
+        self.db.delete_support('A')
+        self.assertEqual(self.post('/api/cases/001/reassign', {'support_id': 'B'}).status_code, 200)
+        notify.assert_called_once_with('Case: 001\nNote: Backfilled case, Owner Changed From Support A to Support B',
+                                     CASE_URL, 'B')
+        self.assertEqual(self.db.list_rows('cases')[0]['url'], CASE_URL)
+
+    def test_api_token_settings_are_encoded_masked_preserved_and_clearable(self):
+        token = 'fake-pagerduty-api-token'
+        response = self.client.put('/api/settings', json={'pagerduty_api_token': token}, headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json['pagerduty_api_token_configured'])
+        self.assertEqual(self.db.settings()['pagerduty_api_token'], token)
+        with self.db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT pagerduty_api_token FROM app_settings WHERE id = 1')
+                stored = cur.fetchone()['pagerduty_api_token']
+        self.assertTrue(stored.startswith(SECRET_STORAGE_PREFIX))
+        self.assertNotIn(token, stored)
+        for result in (response, self.client.get('/api/settings'), self.client.get('/settings')):
+            self.assertNotIn(token, result.text)
+            self.assertNotIn(stored, result.text)
+        self.client.put('/api/settings', json={'webhook_path': TEST_WEBHOOK_PATH}, headers=self.headers)
+        self.db.initialize()
+        self.assertEqual(self.db.settings()['pagerduty_api_token'], token)
+        self.assertTrue(self.client.get('/api/settings').json['pagerduty_api_token_configured'])
+        response = self.client.put('/api/settings', json={'pagerduty_api_token': ''}, headers=self.headers)
+        self.assertFalse(response.json['pagerduty_api_token_configured'])
+        self.assertEqual(self.db.settings()['pagerduty_api_token'], '')
+        for value in (True, None, 123, 'x' * 8193):
+            response = self.client.put('/api/settings', json={'pagerduty_api_token': value}, headers=self.headers)
+            self.assertEqual(response.status_code, 400)
+
+    @patch('app.requests.post', return_value=Mock(status_code=200))
+    @patch('pagerduty.requests.get')
+    def test_webhook_enriches_email_and_sends_exact_slack_payload(self, get, post):
+        self.db.seed_support('U123456789', 'Selected Support')
+        self.db.save_settings({'pagerduty_api_token': 'fake-api-token'})
+        get.side_effect = responses()
+        response = self.webhook({'title': 'Case 02083291 - Medium - HEFEI LCFC INFORMATION TECHNOLOGY CO LTD',
+                                 'self': INCIDENT_URL})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(get.call_count, 2)
+        post.assert_called_once_with('https://slack.example/workflow', json={
+            'message': EXPECTED_MESSAGE, 'url': CASE_URL, 'uid': 'U123456789'}, timeout=10)
+        case = self.client.get('/api/cases').json[0]
+        self.assertEqual(case['id'], '02083291')
+        self.assertEqual(case['url'], CASE_URL)
+        self.assertEqual(case['support_id'], 'U123456789')
+
+    @patch('app.SlackNotifier.send_message', return_value=True)
+    @patch('pagerduty.requests.get')
+    def test_webhook_falls_back_to_three_fields_on_each_enrichment_failure(self, get, notify):
+        self.db.seed_support('U123456789', 'Selected Support', priority=110)
+        self.db.save_settings({'pagerduty_api_token': 'fake-api-token'})
+        failures = [[requests.Timeout()], [Mock(status_code=401)],
+                    [Mock(status_code=200, json=Mock(side_effect=ValueError('bad JSON')))],
+                    [Mock(status_code=200, json=Mock(return_value={}))],
+                    [responses()[0], requests.Timeout()],
+                    [responses()[0], Mock(status_code=200, json=Mock(return_value={'log_entry': {}}))],
+                    responses(EMAIL_BODY.replace('Product:', 'Other:')),
+                    responses(EMAIL_BODY.replace(CASE_URL, '')),
+                    responses(EMAIL_BODY.replace('02083291', '99999999'))]
+        for index, failure in enumerate(failures):
+            case_id = f'00{index}'
+            with self.subTest(failure=index):
+                get.side_effect = failure
+                response = self.webhook({'title': f'Case {case_id} - High - Customer - APAC', 'self': INCIDENT_URL})
+                self.assertEqual(response.status_code, 200)
+                notify.assert_called_with(f'Case: {case_id}\nPriority: High\nAccount: Customer - APAC',
+                                          DEFAULT_CASE_URL, 'U123456789')
+        self.assertEqual(len(self.db.list_rows('cases')), len(failures))
+        self.assertTrue(all(row['url'] == DEFAULT_CASE_URL for row in self.db.list_rows('cases')))
+        self.assertEqual(self.db.list_rows('support_list')[0]['priority'], 110 - len(failures))
+
+    @patch('app.SlackNotifier.send_message', return_value=True)
+    @patch('pagerduty.requests.get')
+    def test_webhook_missing_token_or_self_uses_fallback_without_api_request(self, get, notify):
+        self.db.seed_support()
+        self.assertEqual(self.webhook().status_code, 200)
+        notify.assert_called_once_with('Case: 001\nPriority: Medium\nAccount: Account', DEFAULT_CASE_URL, 'A')
+        self.db.save_settings({'pagerduty_api_token': 'fake-api-token'})
+        self.assertEqual(self.webhook({'title': 'Case 002 - Low - Account'}).status_code, 200)
+        notify.assert_called_with('Case: 002\nPriority: Low\nAccount: Account', DEFAULT_CASE_URL, 'A')
+        get.assert_not_called()
+
+    @patch('app.SlackNotifier.send_message')
+    @patch('pagerduty.requests.get')
+    def test_duplicate_is_skipped_before_pagerduty_and_queue_changes(self, get, notify):
+        self.db.seed_support(priority=102); self.db.seed_case()
+        before = self.db.list_rows('support_list')
+        response = self.webhook()
+        self.assertEqual(response.json['status'], 'skipped')
+        get.assert_not_called(); notify.assert_not_called()
+        self.assertEqual(self.db.list_rows('support_list'), before)
+
+    @patch('app.SlackNotifier.send_message')
+    @patch('pagerduty.requests.get')
+    def test_duplicate_created_during_enrichment_is_not_assigned_again(self, get, notify):
+        self.db.seed_support(priority=102)
+        self.db.save_settings({'pagerduty_api_token': 'fake-api-token'})
+        get.side_effect = responses()
+        original = self.db.create_case
+
+        def competing_case(*args, **kwargs):
+            self.db.seed_case('02083291', url=CASE_URL)
+            return original(*args, **kwargs)
+
+        with patch.object(self.db, 'create_case', side_effect=competing_case):
+            response = self.webhook({'title': 'Case 02083291 - Medium - Account', 'self': INCIDENT_URL})
+        self.assertEqual(response.json['status'], 'skipped')
+        self.assertEqual(self.db.list_rows('support_list')[0]['priority'], 102)
+        notify.assert_not_called()
+
+    @patch('app.SlackNotifier.send_message', return_value=False)
+    @patch('pagerduty.requests.get')
+    def test_enriched_case_survives_slack_failure_and_retry_is_skipped(self, get, notify):
+        self.db.seed_support()
+        self.db.save_settings({'pagerduty_api_token': 'fake-api-token'})
+        get.side_effect = responses()
+        details = {'title': 'Case 02083291 - Medium - Account', 'self': INCIDENT_URL}
+        response = self.webhook(details)
+        self.assertEqual(response.status_code, 207)
+        self.assertEqual(self.db.list_rows('cases')[0]['url'], CASE_URL)
+        self.assertEqual(self.webhook(details).json['status'], 'skipped')
+        self.assertEqual(get.call_count, 2)
+        notify.assert_called_once_with(EXPECTED_MESSAGE, CASE_URL, 'A')
 
     @patch('app.SlackNotifier.send_message')
     def test_reassign_flags_are_independent(self, notify):
@@ -487,6 +695,57 @@ class AssignmentTests(unittest.TestCase):
         self.assertIsNone(self.db.create_case('001'))
         self.assertEqual(self.db.list_rows('support_list'), before)
 
+    def test_case_url_is_persisted_and_preserved_on_reassign(self):
+        self.db.seed_support(); self.db.seed_support('B')
+        url = 'https://suse.lightning.force.com/lightning/r/Case/example/view'
+        self.db.create_case('001', url=url)
+        original = self.db.list_rows('cases')[0]
+        self.db.reassign_case('001', 'B', False)
+        self.assertEqual(self.db.list_rows('cases')[0]['url'], url)
+        self.assertEqual(self.db.list_rows('cases')[0]['created_at'], original['created_at'])
+        self.db.create_case('002', automatic=False, support_id='A')
+        self.assertEqual(next(row for row in self.db.list_rows('cases') if row['id'] == '002')['url'], DEFAULT_CASE_URL)
+
+    def test_legacy_case_url_migration_is_idempotent(self):
+        with self.db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DROP TABLE cases')
+                cur.execute('CREATE TABLE cases (id VARCHAR(30) PRIMARY KEY, support_name VARCHAR(30), '
+                            'support_id VARCHAR(20), created_at DATETIME)')
+                cur.execute("INSERT INTO cases VALUES ('0001', 'Historical Support', 'DELETED', '2020-01-01 00:00:00')")
+            conn.commit()
+        self.db.initialize()
+        historical = self.db.list_rows('cases')[0]
+        self.assertEqual(historical['url'], DEFAULT_CASE_URL)
+        self.assertEqual(historical['id'], '0001')
+        self.assertEqual(historical['support_id'], 'DELETED')
+        self.assertEqual(historical['created_at'], datetime(2020, 1, 1))
+        self.db.seed_case('002', url='https://suse.lightning.force.com/custom')
+        before = self.db.list_rows('cases')
+        self.db.initialize()
+        self.assertEqual(self.db.list_rows('cases'), before)
+
+    def test_fresh_database_initializes_with_case_url_and_empty_token(self):
+        with self.db.get_connection() as conn:
+            with conn.cursor() as cur:
+                for table in ('cases', 'support_list', 'app_settings'):
+                    cur.execute('DROP TABLE ' + table)
+            conn.commit()
+        self.db.initialize()
+        self.assertEqual(self.db.settings()['pagerduty_api_token'], '')
+        self.db.seed_support()
+        self.db.create_case('001')
+        self.assertEqual(self.db.list_rows('cases')[0]['url'], DEFAULT_CASE_URL)
+
+    def test_empty_case_url_rejected_before_queue_changes(self):
+        self.db.seed_support(priority=101)
+        before = self.db.list_rows('support_list')
+        for url in ('', None, ' ', 'x' * 2049):
+            with self.subTest(url=url), self.assertRaises(DomainError):
+                self.db.create_case('001', url=url)
+        self.assertEqual(self.db.list_rows('cases'), [])
+        self.assertEqual(self.db.list_rows('support_list'), before)
+
     def test_same_owner_and_missing_records_do_not_mutate(self):
         self.db.seed_support(); self.db.seed_case()
         for support_id in ('A', 'MISSING'):
@@ -510,6 +769,32 @@ class AssignmentTests(unittest.TestCase):
         with patch('database.pymysql.connect') as connect:
             DatabaseManager().get_connection()
         self.assertEqual(connect.call_args.kwargs['init_command'], "SET time_zone = '+00:00'")
+
+
+class SlackTests(unittest.TestCase):
+    @patch('app.requests.post', return_value=Mock(status_code=200))
+    def test_slack_payload_has_exactly_message_url_and_uid(self, post):
+        message = 'Case: 02083291\nPriority: Medium\nSubject: 组件流量分析\nAccount: Example\nProduct: RKE2'
+        self.assertTrue(server.SlackNotifier('https://slack.example/workflow').send_message(
+            message, DEFAULT_CASE_URL, 'U123456789'))
+        post.assert_called_once_with('https://slack.example/workflow',
+                                     json={'message': message, 'url': DEFAULT_CASE_URL, 'uid': 'U123456789'}, timeout=10)
+
+    @patch('app.time.sleep')
+    @patch('app.requests.post')
+    def test_retry_reuses_full_payload(self, post, sleep):
+        post.side_effect = [requests.Timeout(), Mock(status_code=500), Mock(status_code=200)]
+        self.assertTrue(server.SlackNotifier('https://slack.example/workflow').send_message(
+            'message', DEFAULT_CASE_URL, 'A', max_retries=3))
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        for call in post.call_args_list:
+            self.assertEqual(call.kwargs['json'], {'message': 'message', 'url': DEFAULT_CASE_URL, 'uid': 'A'})
+
+    @patch('app.requests.post')
+    def test_unconfigured_slack_does_not_send(self, post):
+        self.assertFalse(server.SlackNotifier('').send_message('message', DEFAULT_CASE_URL, 'A'))
+        post.assert_not_called()
 
 
 if __name__ == '__main__':

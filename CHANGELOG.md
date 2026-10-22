@@ -63,3 +63,11 @@
 - PagerDuty Secret 以 Base64 编码保存。
 - 分配及重新分配使用事务和数据库锁，保留重复 Case 去重逻辑。
 - 删除 SUPPLEMENT_TRUSTED_IPS，彻底关闭外部 supplement 请求。
+
+## v0.7
+
+- 扩展 PagerDuty Webhook 处理逻辑，查询 incident 和 log_entry，提取更完整的 Case 信息及链接。
+- Slack 工作流格式优化，使用 `message`、`url`、`uid`。
+- Case Reassign 功能优化。
+- Add Case 功能增强，支持更完整的字段。
+- Settings 新增 PagerDuty API Token 配置，Base64 编码存入数据库。

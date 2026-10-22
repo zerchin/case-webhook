@@ -212,7 +212,7 @@ function openModal(title, html, action, submitText = 'Save changes', danger = fa
 function fillSupport(select, excludeId) {
   const available = support.filter(row => row.id !== excludeId);
   select.replaceChildren(...available.map(row => {
-    const option = element('option', `${row.name} · ${row.status} (${row.id})`); option.value = row.id; return option;
+    const option = element('option', `${row.name} · ${row.status}`); option.value = row.id; return option;
   }));
   if (!available.length) { select.append(element('option', 'No support available')); select.options[0].value = ''; }
 }
@@ -229,18 +229,19 @@ function editSupport(row, field) {
   let html;
   if (field === 'status') html = '<label>Status<select name="status"><option>online</option><option>offline</option></select></label><p class="field-hint">Offline support is excluded from automatic assignment.</p>';
   else if (field === 'priority') html = '<label>Priority<input type="number" name="priority" min="-2147483648" max="2147483647" step="1" required></label><p class="field-hint">100 is the standard priority. Higher values receive a supplement; lower values skip a round.</p>';
-  else html = '<label>Updated At<input type="text" name="updated_at" placeholder="YYYY-MM-DD HH:mm:ss" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}" maxlength="19" title="Use YYYY-MM-DD HH:mm:ss" required></label><p class="field-hint" id="edit-time-hint"></p>';
+  else html = '<label>Updated At<input type="datetime-local" name="updated_at" step="1" min="1000-01-01T00:00:00" max="9999-12-31T23:59:59" required></label><p class="field-hint" id="edit-time-hint"></p>';
   openModal(`Edit ${label(field)}`, html, form => {
     let value = form.elements[field].value;
     if (field === 'priority') value = Number(value);
     if (field === 'updated_at') {
-      const date = new Date(value.replace(' ', 'T'));
-      if (Number.isNaN(date.getTime()) || localDateValue(date) !== value) throw new Error('Enter a valid local time in YYYY-MM-DD HH:mm:ss format.');
+      const normalized = value.length === 16 ? `${value}:00` : value;
+      const date = new Date(normalized);
+      if (Number.isNaN(date.getTime()) || localDateValue(date).replace(' ', 'T') !== normalized) throw new Error('Select a valid local date and time.');
       value = date.toISOString();
     }
     return api(`/api/support/${encodeURIComponent(row.id)}`, { method: 'PATCH', body: JSON.stringify({ [field]: value }) });
   });
-  $('#modal-fields [name]').value = field === 'updated_at' ? (row[field] ? localDateValue(new Date(row[field])) : '') : row[field];
+  $('#modal-fields [name]').value = field === 'updated_at' ? (row[field] ? localDateValue(new Date(row[field])).replace(' ', 'T') : '') : row[field];
   if (field === 'updated_at') $('#edit-time-hint').textContent = `Enter time in ${zone}. It is converted to UTC before saving.`;
 }
 function addCase() {
@@ -249,11 +250,22 @@ function addCase() {
     <label class="check"><input name="notify" type="checkbox" checked>Send Slack notification</label>
     <label>Priority<select name="priority"><option>Critical</option><option>High</option><option selected>Medium</option><option>Low</option></select></label>
     <label>Account Name <span class="required">*</span><input name="account_name" required maxlength="255" autocomplete="off"></label>
+    <details class="case-advanced" id="case-advanced">
+      <summary>Advanced options</summary>
+      <div class="form-stack">
+        <label>Subject<input name="subject" maxlength="1000" autocomplete="off"></label>
+        <label>Product<input name="product" maxlength="255" autocomplete="off"></label>
+        <label>Salesforce URL<input name="url" type="url" maxlength="2048" value="https://suse.lightning.force.com" pattern="https?://.+" title="Enter an HTTP or HTTPS URL." autocomplete="off"></label>
+      </div>
+    </details>
     <label id="manual-label" hidden>Support <span class="required">*</span><select name="support_id" disabled></select></label>
     <p class="field-hint" id="assignment-hint"></p>`, form => {
       const notify = form.elements.notify.checked;
-      const data = { id: form.elements.id.value, notify };
-      if (notify) { data.priority = form.elements.priority.value; data.account_name = form.elements.account_name.value; }
+      const data = { id: form.elements.id.value, notify, url: form.elements.url.value };
+      if (notify) {
+        data.priority = form.elements.priority.value; data.account_name = form.elements.account_name.value;
+        data.subject = form.elements.subject.value; data.product = form.elements.product.value;
+      }
       else data.support_id = form.elements.support_id.value;
       return api('/api/cases', { method: 'POST', body: JSON.stringify(data) });
     }, 'Add Case');
@@ -263,19 +275,21 @@ function addCase() {
     form.elements.priority.disabled = !notify;
     form.elements.account_name.disabled = !notify;
     form.elements.account_name.required = notify;
+    for (const field of ['subject', 'product']) form.elements[field].disabled = !notify;
     form.elements.support_id.disabled = notify;
     form.elements.support_id.required = !notify;
     $('#manual-label').hidden = notify;
     $('#assignment-hint').textContent = notify ? 'Support is assigned automatically using the support queue.' : 'Without a notification, you must select support manually. This does not trigger support rotation or change priority or Updated At.';
   };
   form.elements.notify.addEventListener('change', toggle); toggle();
+  form.elements.url.addEventListener('invalid', () => { $('#case-advanced').open = true; });
 }
 function reassignCase(row) {
   openModal('Reassign Case', `
     <p class="field-hint" id="current-owner"></p>
     <label>New Support <span class="required">*</span><select name="support_id" required></select></label>
     <label class="check"><input type="checkbox" name="notify" checked>Send Slack notification</label>
-    <label class="check"><input type="checkbox" name="adjust_priority" checked>Adjust support priority (supplement)</label>
+    <label class="check"><input type="checkbox" name="adjust_priority" checked>Backfilled case: adjust support priority</label>
     <p class="field-hint" id="priority-adjustment-hint"></p>`,
     form => api(`/api/cases/${encodeURIComponent(row.id)}/reassign`, { method: 'POST', body: JSON.stringify({ support_id: form.elements.support_id.value, notify: form.elements.notify.checked, adjust_priority: form.elements.adjust_priority.checked }) }), 'Reassign Case');
   $('#current-owner').textContent = `Case ${row.id} · Currently assigned to ${row.support_name}`;
@@ -358,10 +372,12 @@ function applySettings(settings) {
   if (path && !valid) notice(`The saved path ${path} is disabled. Enter a suffix under ${prefix}, save it, and update the PagerDuty webhook URL.`, 'warning');
   $('#slack-state').textContent = settings.slack_webhook_url_configured ? 'Configured' : 'Not configured';
   $('#secret-state').textContent = settings.pagerduty_webhook_secret_configured ? 'Configured' : 'Not configured';
-  $('#slack-url').value = ''; $('#pd-secret').value = '';
+  $('#token-state').textContent = settings.pagerduty_api_token_configured ? 'Configured' : 'Not configured';
+  $('#slack-url').value = ''; $('#pd-secret').value = ''; $('#pd-token').value = '';
   $('#slack-url').placeholder = settings.slack_webhook_url_configured ? 'Leave blank to keep saved URL' : 'Enter a webhook URL';
   $('#pd-secret').placeholder = settings.pagerduty_webhook_secret_configured ? 'Leave blank to keep saved secret' : 'Enter your signing secret';
-  $('#clear-slack').checked = false; $('#clear-secret').checked = false;
+  $('#pd-token').placeholder = settings.pagerduty_api_token_configured ? 'Leave blank to keep saved token' : 'Enter your API token';
+  $('#clear-slack').checked = false; $('#clear-secret').checked = false; $('#clear-token').checked = false;
   previewPath();
 }
 async function loadSettings() {
@@ -381,8 +397,10 @@ if (page === 'settings') {
     const data = { webhook_path: configuredWebhookPath() };
     if ($('#slack-url').value) data.slack_webhook_url = $('#slack-url').value;
     if ($('#pd-secret').value) data.pagerduty_webhook_secret = $('#pd-secret').value;
+    if ($('#pd-token').value) data.pagerduty_api_token = $('#pd-token').value;
     if ($('#clear-slack').checked) data.slack_webhook_url = '';
     if ($('#clear-secret').checked) data.pagerduty_webhook_secret = '';
+    if ($('#clear-token').checked) data.pagerduty_api_token = '';
     try { applySettings(await api('/api/settings', { method: 'PUT', body: JSON.stringify(data) })); notice('Settings saved. Changes are now active.'); }
     catch (error) { notice(error.message, 'error'); }
     finally { button.disabled = false; }

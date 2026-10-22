@@ -1,7 +1,8 @@
-# case-webhook v0.6
+# case-webhook v0.7
 
 通过 PagerDuty 获取 Case，按队列分配 Support，并通过 Slack 工作流发送通知。
 v0.6 将英文管理 UI、管理接口和 PagerDuty Webhook 集成到同一个 Flask 服务、同一个端口，不再需要独立的 `case-webhook-ui` 容器。
+v0.7 从 PagerDuty 的首条触发日志提取邮件内容和 Case 链接，Slack 工作流统一接收 `message`、`url`、`uid` 三个字段。
 
 ## 启动
 
@@ -15,10 +16,10 @@ CREATE DATABASE IF NOT EXISTS case_system
 构建并运行：
 
 ```bash
-docker build -t case-webhook:v0.6 .
+docker build -t case-webhook:v0.7 .
 
 docker run -d \
-  --name case-webhook-v6 \
+  --name case-webhook-v7 \
   -p 80:5000 \
   -e MYSQL_HOST=192.168.2.68 \
   -e MYSQL_PORT=3306 \
@@ -27,37 +28,48 @@ docker run -d \
   -e MYSQL_DB=case_system \
   -e ADMIN_PASSWORD='<admin password>' \
   -e PORT=5000 \
-  case-webhook:v0.6
+  case-webhook:v0.7
 ```
 
-访问 `http://<server>/`，使用 `admin` 和 `ADMIN_PASSWORD` 登录。直接运行 `app.py` 时，缺少 `ADMIN_PASSWORD` 会拒绝启动。v0.6 只有管理员账号。登录有效期为 8 小时，服务重启后需要重新登录。
+访问 `http://<server>/`，使用 `admin` 和 `ADMIN_PASSWORD` 登录。直接运行 `app.py` 时，缺少 `ADMIN_PASSWORD` 会拒绝启动。当前只有管理员账号。登录有效期为 8 小时，服务重启后需要重新登录。
 
-首次访问会自动创建缺失的 `support_list`、`cases`、`app_settings` 表。示例中的 `case_webhook` 账号需事先创建，并具备该数据库的读写和建表权限；数据库本身需要提前创建。已有 Support、Case 数据会保留。
+首次访问会自动创建缺失的 `support_list`、`cases`、`app_settings` 表，并为旧表添加 `cases.url` 和 `app_settings.pagerduty_api_token` 字段。示例中的 `case_webhook` 账号需事先创建，并具备该数据库的读写、建表和 `ALTER` 权限；数据库本身需要提前创建。已有 Support、Case 数据会保留。
 
-自动建表不会改造已有同名表。如果旧库的 `app_settings` 是 `name/value` 或 `key/value` 结构，需要先备份并处理结构冲突，不能直接覆盖旧表。
+迁移只添加上述字段、补齐 Case URL 和编码旧版 Signing Secret，不会修复其他旧表结构。如果旧库的 `app_settings` 是 `name/value` 或 `key/value` 结构，需要先备份并处理结构冲突，不能直接覆盖旧表。
 
 在 **Settings** 中配置并保存：
 
 | 设置 | 说明 |
 | --- | --- |
 | Webhook path | 固定前缀 `/webhooks/pd/v3/`，只需填写自定义后缀，或点击按钮生成随机后缀 |
-| Slack webhook URL | Slack 工作流 Webhook，工作流接收名为 `message` 的输入 |
+| Slack webhook URL | Slack 工作流 Webhook，工作流接收 `message`、`url`、`uid` 三个文本输入 |
 | PAGERDUTY_WEBHOOK_SECRET | 填写原始 Signing Secret，使用 Base64 编码保存在数据库中 |
+| PAGERDUTY_API_TOKEN | 可读取 PagerDuty API 的 Token，使用 Base64 编码保存在数据库中 |
 
-这三项仅保存在 MySQL 中，保存后立即生效，容器重建后仍保留。Slack URL 和 Signing Secret 不会通过读取接口返回，页面显示是否已配置；输入框留空表示保留原值，勾选清除才会删除保存的配置。
+这四项仅保存在 MySQL 中，保存后立即生效，容器重建后仍保留。Slack URL、Signing Secret 和 API Token 不会通过读取接口返回，页面显示是否已配置；输入框留空表示保留原值，勾选清除才会删除保存的配置。Base64 是编码，不是加密。
 
 Webhook 后缀允许 1–239 位字母、数字、连字符或下划线；生成按钮默认生成 64 位随机十六进制后缀。后缀留空会关闭 Webhook。不带固定前缀的旧路径已停用，数据库地址不会自动改写，需要在 Settings 保存新后缀，并同步更新 PagerDuty 中的完整 URL。
+
+## 从 v0.6 升级到 v0.7
+
+1. 备份数据库，确认应用账号有 `ALTER` 权限。
+2. 为 Slack 工作流配置 `message`、`url`、`uid` 三个文本输入，更新工作流中的消息和人员引用。
+3. 先停止旧容器，释放示例中的 80 端口，再使用 v0.7 镜像连接原数据库。首次访问时自动添加字段，所有旧 Case 的 URL 补为 `https://suse.lightning.force.com`；重复初始化保留已保存的具体 Case 链接。
+4. 在 Settings 中保存 `PAGERDUTY_API_TOKEN`。原 Webhook 后缀、Slack URL、Signing Secret 和 Support 队列继续使用。
+
+`cases.url` 为 `VARCHAR(2048) NOT NULL`，数据库默认值为 `https://suse.lightning.force.com`。手动新增 Case 可以在高级选项中指定 URL，无论是否发送通知都会保存；未填写 URL 时使用默认值。Reassign 保留原 Case URL。
 
 ## 从 v0.5 升级
 
 1. 备份现有数据库，确认历史时间使用的时区（见下文）。
 2. 启动新容器前，使用 `docker stop <旧后端容器名>` 停止旧后端容器，释放示例中使用的 80 端口。
-3. 使用 v0.6 镜像连接原数据库，设置数据库 env 和 `ADMIN_PASSWORD`。
+3. 使用 v0.7 镜像连接原数据库，设置数据库 env 和 `ADMIN_PASSWORD`。
 4. 登录 Settings，填写 Webhook 后缀、Slack URL 和原始 Signing Secret 后保存。旧 env 不会自动迁移。
 5. 如果原路径已是 `/webhooks/pd/v3/<suffix>`，填写相同后缀即可继续使用；其他旧路径已停用，需要保存新后缀并更新 PagerDuty Subscription 中的 URL。
 6. 停用独立 UI 容器。UI 重新分配直接调用认证后的内部逻辑，不再发外部 supplement 请求。
+7. 按上节配置 Slack 三个输入和 PagerDuty API Token。
 
-`SUPPLEMENT_TRUSTED_IPS` 已删除。**所有外部 supplement 请求都被拒绝，包括有有效 PagerDuty 签名的请求**。旧 UI 不能再通过 supplement 修改优先级，应改用 v0.6 集成 UI。
+`SUPPLEMENT_TRUSTED_IPS` 已删除。**所有外部 supplement 请求都被拒绝，包括有有效 PagerDuty 签名的请求**。旧 UI 不能再通过 supplement 修改优先级，应改用集成 UI。
 
 从 v0.3/v0.4 升级时，先完成旧的表结构升级（已有字段不要重复添加）：
 
@@ -72,7 +84,7 @@ ALTER TABLE support_list
 
 ## 时间与时区
 
-v0.6 的数据库连接统一使用 UTC，新写入的 `created_at`、`updated_at` 均为 UTC 时间。UI 按浏览器时区显示时间，手动设置 Updated At 时也按浏览器时区输入，保存前转换为 UTC。
+数据库连接统一使用 UTC，新写入的 `created_at`、`updated_at` 均为 UTC 时间。UI 按浏览器时区显示时间，手动设置 Updated At 时也按浏览器时区输入，保存前转换为 UTC。
 
 历史 DATETIME 记录会按 UTC 解释，不会自动转换。旧数据已是 UTC 时无需处理；如果使用其他时区，需要先备份，再按实际时区另行转换。
 
@@ -101,7 +113,7 @@ Slack 通知在数据库事务提交后发送，失败最多尝试 15 次，退�
 请求示例：
 
 ```json
-{"event":{"data":{"title":"Case 01590054 - Medium - Customer Company"}}}
+{"event":{"data":{"title":"Case 02083291 - Medium - HEFEI LCFC INFORMATION TECHNOLOGY CO LTD","self":"https://api.pagerduty.com/incidents/Q235TB5V667RKR"}}}
 ```
 
 模拟请求（以下变量仅在发送请求的终端使用，URL 必须与 Settings 中保存的完整 URL 一致，Secret 使用原始值）：
@@ -109,7 +121,7 @@ Slack 通知在数据库事务提交后发送，失败最多尝试 15 次，退�
 ```bash
 WEBHOOK_URL='http://<server>/webhooks/pd/v3/<saved-suffix>'
 SIGNING_SECRET='<PagerDuty Webhook Signing Secret>'
-payload='{"event":{"data":{"title":"Case 01602520 - Medium - Customer‘s Company"}}}'
+payload='{"event":{"data":{"title":"Case 02083291 - Medium - HEFEI LCFC INFORMATION TECHNOLOGY CO LTD","self":"https://api.pagerduty.com/incidents/Q235TB5V667RKR"}}}'
 signature="$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$SIGNING_SECRET" -hex | awk '{print $NF}')"
 
 curl -X POST \
@@ -119,12 +131,36 @@ curl -X POST \
   "$WEBHOOK_URL"
 ```
 
-Slack 工作流收到的 `message`：
+通过签名校验后，先从 title 提取 Case ID 并查询数据库。已有 Case 直接跳过，不请求 PagerDuty、不轮询、不发送通知。新 Case 的处理顺序：
+
+1. 使用 `.event.data.self` 请求 incident，读取 `.incident.first_trigger_log_entry.self`。
+2. 请求该 log entry，携带 `include[]=channels` 查询参数，读取 `.log_entry.channel.body`。
+3. 提取 Case、Priority、Subject、Account、Product 和 Case 超链接；Product Family 等其他字段不进入消息。
+4. 按原队列分配 Support，保存 Case 和 URL，事务提交后发送 Slack 通知。写入时再次在锁内去重。
+
+两次 PagerDuty 请求均携带 `Accept: application/vnd.pagerduty+json;version=2` 和 `Authorization: Token token=<API Token>`，每次超时 10 秒。只向 `https://api.pagerduty.com` 下对应的 incident/log entry 路径发送 Token，不跟随重定向。
+
+Slack 工作流收到的 JSON 示例：
+
+```json
+{
+  "message": "Case: 02083291\nPriority: Medium\nSubject: controller plane组件流量分析\nAccount: HEFEI LCFC INFORMATION TECHNOLOGY CO LTD\nProduct: SUSE Rancher Prime: RKE2 Other x86_64",
+  "url": "https://suse.lightning.force.com/lightning/r/Case/500bG000013TW7F/view",
+  "uid": "U123456789"
+}
+```
+
+`message` 的五个字段严格按以上顺序逐行排列。
+
+未配置 API Token、请求失败、响应字段缺失或邮件解析失败时，回退到原 title 提取信息。title 需符合 `Case <ID> - <Priority> - <Account>` 格式；无法提取这些字段时返回 `400`，不分配 Case。提取成功后按原队列分配，形成以下 `message`，`url` 使用 `https://suse.lightning.force.com`，`uid` 使用轮询结果：
 
 ```text
-Case 01590054 - Medium - Customer Company
-Owner: Tom Li <@U02345ABCD1234>
+Case: 02083291
+Priority: Medium
+Account: HEFEI LCFC INFORMATION TECHNOLOGY CO LTD
 ```
+
+
 
 ## 本地开发与测试
 
@@ -141,4 +177,4 @@ node --check static/app.js
 
 自动化测试使用隔离 SQLite 适配器验证 SQL 操作、事务回滚、分配结果和 Flask 接口；适配器移除 MySQL 的 `FOR UPDATE`，不能证明真实 MySQL 的锁与并发行为。真实 MySQL 验证方法见 `tests/test_mysql.py`，必须使用独立测试数据库。
 
-健康检查：`GET /health` 返回版本 `0.6.0` 和进程健康状态，不检测数据库连接。
+健康检查：`GET /health` 返回版本 `0.7.0` 和进程健康状态，不检测数据库连接。

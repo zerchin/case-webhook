@@ -16,7 +16,8 @@ import requests
 from flask import Flask, abort, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from database import DatabaseManager, DomainError, serialize_row
+from database import DEFAULT_CASE_URL, DatabaseManager, DomainError, serialize_row
+from pagerduty import PagerDutyClient, fallback_case_message
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -158,6 +159,27 @@ def text_field(data, key, maximum):
     return value.strip()
 
 
+def optional_text_field(data, key, maximum):
+    value = data.get(key, '')
+    if not isinstance(value, str) or len(value.strip()) > maximum:
+        raise DomainError(f'{key.replace("_", " ").title()} must be text (maximum {maximum} characters).')
+    return value.strip()
+
+
+def case_url_field(data):
+    url = optional_text_field(data, 'url', 2048) or DEFAULT_CASE_URL
+    try:
+        parsed = urlsplit(url)
+        parsed.port
+        valid = (parsed.scheme in {'http', 'https'} and parsed.hostname and not parsed.username
+                 and not parsed.password and not any(character.isspace() or ord(character) < 32 for character in url))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise DomainError('Salesforce URL must be an HTTP or HTTPS URL without credentials.')
+    return url
+
+
 def boolean_field(data, key, default=True):
     value = data.get(key, default)
     if not isinstance(value, bool):
@@ -213,7 +235,7 @@ def settings_api():
             path = path.strip()
             validate_webhook_path(path)
             values['webhook_path'] = path
-        for key in ('slack_webhook_url', 'pagerduty_webhook_secret'):
+        for key in ('slack_webhook_url', 'pagerduty_webhook_secret', 'pagerduty_api_token'):
             if key in data:
                 if not isinstance(data[key], str) or len(data[key]) > 8192:
                     raise DomainError('Invalid setting value.')
@@ -231,7 +253,8 @@ def settings_api():
     settings = db.settings()
     return jsonify(webhook_path=settings['webhook_path'],
                    slack_webhook_url_configured=bool(settings['slack_webhook_url']),
-                   pagerduty_webhook_secret_configured=bool(settings['pagerduty_webhook_secret']))
+                   pagerduty_webhook_secret_configured=bool(settings['pagerduty_webhook_secret']),
+                   pagerduty_api_token_configured=bool(settings['pagerduty_api_token']))
 
 
 @app.route('/api/support', methods=['GET', 'POST'])
@@ -273,12 +296,12 @@ class SlackNotifier:
     def __init__(self, webhook_url):
         self.webhook_url = webhook_url
 
-    def send_message(self, message, max_retries=15):
+    def send_message(self, message, url, uid, max_retries=15):
         if not self.webhook_url:
             return False
         for attempt in range(max_retries):
             try:
-                response = requests.post(self.webhook_url, json={'message': message}, timeout=10)
+                response = requests.post(self.webhook_url, json={'message': message, 'url': url, 'uid': uid}, timeout=10)
                 if response.status_code == 200:
                     return True
             except requests.RequestException:
@@ -288,20 +311,20 @@ class SlackNotifier:
         return False
 
 
-def notification_result(case_id, message=None, settings=None, status_code=200):
+def notification_result(case_id, message=None, settings=None, status_code=200, url=DEFAULT_CASE_URL, uid=None):
     if message is not None:
         settings = settings if settings is not None else db.settings()
-        if not SlackNotifier(settings['slack_webhook_url']).send_message(message):
+        if not SlackNotifier(settings['slack_webhook_url']).send_message(message, url, uid):
             return jsonify(status='partial_success', case_id=case_id,
                            message='Case saved, but the Slack notification failed. Do not retry the case operation; check Settings and Slack.'), 207
     return jsonify(status='success', case_id=case_id), status_code
 
 
-def automatic_case(case_id, title, settings=None, status_code=200, duplicate_status=200):
-    support = db.create_case(case_id)
+def automatic_case(case_id, message, settings=None, status_code=200, duplicate_status=200, url=DEFAULT_CASE_URL):
+    support = db.create_case(case_id, url=url)
     if support is None:
         return jsonify(status='skipped', reason='Case already exists.'), duplicate_status
-    return notification_result(case_id, f"{title}\nOwner: {support['name']} <@{support['id']}>", settings, status_code)
+    return notification_result(case_id, message, settings, status_code, url=url, uid=support['id'])
 
 
 @app.route('/api/cases', methods=['GET', 'POST'])
@@ -313,14 +336,23 @@ def cases_api():
     case_id = data.get('id')
     if not isinstance(case_id, str) or not re.fullmatch(r'[0-9]{1,30}', case_id):
         raise DomainError('Case ID must contain 1–30 digits (0–9) only.')
+    url = case_url_field(data)
     if boolean_field(data, 'notify'):
         priority = data.get('priority', 'Medium')
         if priority not in ('Critical', 'High', 'Medium', 'Low'):
             raise DomainError('Select a valid case priority.')
         account = text_field(data, 'account_name', 255)
-        return automatic_case(case_id, f'Case {case_id} - {priority} - {account}', status_code=201, duplicate_status=409)
+        subject = optional_text_field(data, 'subject', 1000)
+        product = optional_text_field(data, 'product', 255)
+        lines = [f'Case: {case_id}', f'Priority: {priority}']
+        if subject:
+            lines.append(f'Subject: {subject}')
+        lines.append(f'Account: {account}')
+        if product:
+            lines.append(f'Product: {product}')
+        return automatic_case(case_id, '\n'.join(lines), status_code=201, duplicate_status=409, url=url)
     support_id = text_field(data, 'support_id', 20)
-    if db.create_case(case_id, automatic=False, support_id=support_id) is None:
+    if db.create_case(case_id, automatic=False, support_id=support_id, url=url) is None:
         raise DomainError('Case already exists.', 409)
     return notification_result(case_id, status_code=201)
 
@@ -333,8 +365,9 @@ def reassign_case_api(case_id):
     notify = boolean_field(data, 'notify')
     adjust = boolean_field(data, 'adjust_priority')
     case, support = db.reassign_case(case_id, support_id, adjust)
-    message = (f"Supplementary Case {case_id}\nOwner Changed From {case['support_name']} to {support['name']} <@{support['id']}>\n" if notify else None)
-    return notification_result(case_id, message)
+    message = (f"Case: {case_id}\nNote: Backfilled case, Owner Changed From {case['support_name']} to {support['name']}"
+               if notify else None)
+    return notification_result(case_id, message, url=case['url'], uid=support['id'])
 
 
 @app.delete('/api/cases/<path:case_id>')
@@ -397,12 +430,20 @@ def webhook_receiver(suffix):
     match = re.search(r'Case\s+(\d+)', title) if isinstance(title, str) else None
     if not match or len(match.group(1)) > 30:
         raise DomainError('Cannot extract case ID from title.')
-    return automatic_case(match.group(1), title, settings)
+    case_id = match.group(1)
+    if db.case_exists(case_id):
+        return jsonify(status='skipped', reason='Case already exists.')
+    try:
+        message, url = PagerDutyClient(settings['pagerduty_api_token']).case_details(details.get('self'), case_id)
+    except DomainError as error:
+        logger.warning('PagerDuty details unavailable for case %s; using title and default URL: %s', case_id, error)
+        message, url = fallback_case_message(title, case_id), DEFAULT_CASE_URL
+    return automatic_case(case_id, message, settings, url=url)
 
 
 @app.get('/health')
 def health_check():
-    return jsonify(status='healthy', version='0.6.0')
+    return jsonify(status='healthy', version='0.7.0')
 
 
 if __name__ == '__main__':

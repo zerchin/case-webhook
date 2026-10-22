@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制应用代码
 COPY app.py .
 COPY database.py .
+COPY pagerduty.py .
 COPY templates/ templates/
 COPY static/ static/
 

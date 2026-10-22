@@ -14,6 +14,7 @@ class DomainError(Exception):
 
 
 SECRET_STORAGE_PREFIX = 'base64:v1:'
+DEFAULT_CASE_URL = 'https://suse.lightning.force.com'
 
 
 def encode_webhook_secret(secret):
@@ -23,14 +24,14 @@ def encode_webhook_secret(secret):
     return SECRET_STORAGE_PREFIX + base64.b64encode(secret.encode('utf-8')).decode('ascii')
 
 
-def decode_webhook_secret(stored):
+def decode_webhook_secret(stored, credential='PagerDuty signing secret'):
     if not stored or not stored.startswith(SECRET_STORAGE_PREFIX):
         # Older installations stored plaintext; initialization migrates it.
         return stored
     try:
         return base64.b64decode(stored[len(SECRET_STORAGE_PREFIX):], validate=True).decode('utf-8')
     except (binascii.Error, ValueError, UnicodeError):
-        raise DomainError('Stored PagerDuty signing secret is invalid. Save it again in Settings.', 503) from None
+        raise DomainError(f'Stored {credential} is invalid. Save it again in Settings.', 503) from None
 
 
 class DatabaseManager:
@@ -57,19 +58,37 @@ class DatabaseManager:
                 cur.execute("""CREATE TABLE IF NOT EXISTS cases (
                     id VARCHAR(30) NOT NULL PRIMARY KEY, support_name VARCHAR(30) NOT NULL,
                     support_id VARCHAR(20) NOT NULL,
+                    url VARCHAR(2048) NOT NULL DEFAULT 'https://suse.lightning.force.com',
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""")
                 cur.execute("""CREATE TABLE IF NOT EXISTS app_settings (
                     id INT NOT NULL PRIMARY KEY,
                     webhook_path VARCHAR(255) NOT NULL DEFAULT '',
                     slack_webhook_url TEXT NOT NULL,
-                    pagerduty_webhook_secret TEXT NOT NULL
+                    pagerduty_webhook_secret TEXT NOT NULL,
+                    pagerduty_api_token TEXT NULL
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+                self.ensure_column(cur, 'app_settings', 'pagerduty_api_token', 'TEXT NULL')
                 cur.execute("""INSERT IGNORE INTO app_settings
-                    (id, webhook_path, slack_webhook_url, pagerduty_webhook_secret)
-                    VALUES (1, '', '', '')""")
+                    (id, webhook_path, slack_webhook_url, pagerduty_webhook_secret, pagerduty_api_token)
+                    VALUES (1, '', '', '', '')""")
+                self.ensure_column(cur, 'cases', 'url',
+                                   "VARCHAR(2048) NOT NULL DEFAULT 'https://suse.lightning.force.com'")
+                cur.execute("UPDATE cases SET url = %s WHERE url IS NULL OR TRIM(url) = ''", (DEFAULT_CASE_URL,))
             conn.commit()
         self.migrate_webhook_secret()
+
+    @staticmethod
+    def ensure_column(cur, table, column, definition):
+        cur.execute('SELECT COLUMN_NAME FROM information_schema.COLUMNS '
+                    'WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s', (table, column))
+        if not cur.fetchone():
+            try:
+                cur.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + definition)
+            except pymysql.OperationalError as error:
+                # Another worker may have completed the same additive migration.
+                if error.args[0] != 1060:
+                    raise
 
     def migrate_webhook_secret(self):
         """Upgrade only the existing secret value; preserve other settings."""
@@ -86,18 +105,20 @@ class DatabaseManager:
     def settings(self):
         with self.get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute('SELECT webhook_path, slack_webhook_url, pagerduty_webhook_secret FROM app_settings WHERE id = 1')
+                cur.execute('SELECT webhook_path, slack_webhook_url, pagerduty_webhook_secret, pagerduty_api_token '
+                            'FROM app_settings WHERE id = 1')
                 row = cur.fetchone()
                 row['pagerduty_webhook_secret'] = decode_webhook_secret(row['pagerduty_webhook_secret'])
+                row['pagerduty_api_token'] = decode_webhook_secret(row['pagerduty_api_token'] or '', 'PagerDuty API token')
                 return row
 
     def save_settings(self, values):
         with self.get_connection() as conn:
             with conn.cursor() as cur:
                 for key, value in values.items():
-                    if key not in {'webhook_path', 'slack_webhook_url', 'pagerduty_webhook_secret'}:
+                    if key not in {'webhook_path', 'slack_webhook_url', 'pagerduty_webhook_secret', 'pagerduty_api_token'}:
                         raise ValueError('Unknown setting')
-                    if key == 'pagerduty_webhook_secret':
+                    if key in {'pagerduty_webhook_secret', 'pagerduty_api_token'}:
                         value = encode_webhook_secret(value)
                     cur.execute('UPDATE app_settings SET ' + key + ' = %s WHERE id = 1', (value,))
             conn.commit()
@@ -158,7 +179,15 @@ class DatabaseManager:
             raise DomainError('Support not found.', 404)
         return support
 
-    def create_case(self, case_id, automatic=True, support_id=None):
+    def case_exists(self, case_id):
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT id FROM cases WHERE id = %s', (case_id,))
+                return cur.fetchone() is not None
+
+    def create_case(self, case_id, automatic=True, support_id=None, url=DEFAULT_CASE_URL):
+        if not isinstance(url, str) or not url.strip() or len(url) > 2048:
+            raise DomainError('Case URL is required (maximum 2048 characters).')
         with self.get_connection() as conn:
             with conn.cursor() as cur:
                 self.lock_queue(cur)
@@ -195,8 +224,8 @@ class DatabaseManager:
                         cur.execute('UPDATE support_list SET updated_at = NOW() WHERE id = %s', (support['id'],))
                 else:
                     support = self.select_support(cur, support_id)
-                cur.execute("""INSERT INTO cases (id, support_name, support_id, created_at)
-                    VALUES (%s, %s, %s, NOW())""", (case_id, support['name'], support['id']))
+                cur.execute("""INSERT INTO cases (id, support_name, support_id, url, created_at)
+                    VALUES (%s, %s, %s, %s, NOW())""", (case_id, support['name'], support['id'], url))
             conn.commit()
         return support
 
