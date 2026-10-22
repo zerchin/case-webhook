@@ -48,3 +48,18 @@
 | case-webhook    | zerchin/case-webhook:v0.5    |
 | case-webhook-ui | zerchin/case-webhook-ui:v0.4 |
 
+
+
+## v0.5-signature
+
+- 引入 PagerDuty V3 Webhook 的 HMAC-SHA256 签名校验，拒绝未签名或签名无效的普通请求。
+- 旧版 supplement 请求增加 `SUPPLEMENT_TRUSTED_IPS` IP/CIDR 白名单校验。
+
+## v0.6
+
+- 集成并重新设计管理 UI 风格，不再需要独立 UI 镜像。
+- 支持 UI 配置 Webhook 后缀、Slack URL 和 PagerDuty Secret，不再读取 `WEBHOOK_PATH`、`SLACK_Webhook_URL`、`PAGERDUTY_WEBHOOK_SECRET` 环境变量。
+- Webhook Path 固定前缀为 `/webhooks/pd/v3/`，旧的非标准路径停用。
+- PagerDuty Secret 以 Base64 编码保存。
+- 分配及重新分配使用事务和数据库锁，保留重复 Case 去重逻辑。
+- 删除 SUPPLEMENT_TRUSTED_IPS，彻底关闭外部 supplement 请求。

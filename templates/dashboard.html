@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ session.csrf_token }}">
+  <title>{{ page.title() }} · Case Webhook</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body data-page="{{ page }}">
+  <aside class="sidebar">
+    <a class="brand" href="/support"><span class="brand-icon" aria-hidden="true">c<span>.</span></span><span>case webhook</span></a>
+    <nav aria-label="Main navigation">
+      <a href="/support" class="{{ 'active' if page == 'support' }}"><span aria-hidden="true">◉</span>Support</a>
+      <a href="/cases" class="{{ 'active' if page == 'cases' }}"><span aria-hidden="true">▤</span>Cases</a>
+      <a href="/settings" class="{{ 'active' if page == 'settings' }}"><span aria-hidden="true">⚙</span>Settings</a>
+    </nav>
+    <div class="sidebar-bottom"><div class="profile"><span class="avatar">A</span><div>admin<small>Administrator</small></div><span class="version">v0.6</span></div><button id="logout" class="quiet">Sign out <span aria-hidden="true">↗</span></button></div>
+  </aside>
+  <div class="workspace-main">
+    <main>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div class="page-heading"><h1>{{ 'Support queue' if page == 'support' else ('Cases' if page == 'cases' else 'Settings') }}</h1>{% if page != 'settings' %}<button id="add" class="primary">+ Add {{ 'Support' if page == 'support' else 'Case' }}</button>{% endif %}</div>
+      {% if page != 'settings' %}
+      <section class="table-panel">
+        <div class="table-toolbar"><div><h2>{{ 'Support directory' if page == 'support' else 'All cases' }}</h2><span id="count" class="count">Loading…</span></div><div class="toolbar-actions">{% if page == 'cases' %}<button id="delete-selected" class="danger" type="button" disabled>Delete selected (0)</button>{% endif %}<input id="search" type="search" placeholder="Search {{ 'support' if page == 'support' else 'cases' }}…" aria-label="Search records"><button id="refresh" class="secondary">↻ Refresh</button></div></div>
+        <div class="table-scroll"><table><thead id="table-head"></thead><tbody id="table-body"></tbody></table></div>
+        <div class="table-footer"><span id="sort-note"></span><span>Times shown in your browser timezone</span></div>
+      </section>
+      {% else %}
+      <form id="settings-form" class="settings-form">
+        <section class="settings-section"><div><h2>Webhook endpoint</h2></div><div class="form-stack">
+          <label for="webhook-path">Webhook path <span class="required">*</span></label>
+          <div class="input-action"><div class="webhook-path-field"><span id="webhook-prefix" class="webhook-prefix">{{ webhook_path_prefix }}</span><input id="webhook-path" name="webhook_suffix" maxlength="{{ 255 - (webhook_path_prefix | length) }}" pattern="[A-Za-z0-9_\-]+" title="Use letters, digits, hyphens or underscores." placeholder="your-token"></div><button id="generate" class="secondary" type="button">Generate suffix</button></div>
+          <details class="help"><summary>ⓘ How do I create a webhook path?</summary><p>The prefix {{ webhook_path_prefix }} is fixed. Generate a random 64-character hex suffix, or enter a custom suffix using letters, digits, hyphens or underscores. Paste the full URL below into your PagerDuty V3 Webhook Subscription after saving. Leave the suffix blank to disable the endpoint. Paths outside this prefix are disabled.</p></details>
+          <div class="endpoint-preview"><small>WEBHOOK URL</small><code id="webhook-preview">Not configured</code></div>
+        </div></section>
+        <section class="settings-section"><div><h2>Slack notifications</h2></div><div class="form-stack">
+          <label for="slack-url">Slack webhook URL <span id="slack-state" class="config-state"></span></label>
+          <input type="password" id="slack-url" name="slack_webhook_url" autocomplete="new-password" placeholder="Enter a webhook URL" maxlength="8192">
+          <label class="check"><input id="clear-slack" type="checkbox">Clear saved Slack URL</label>
+        </div></section>
+        <section class="settings-section"><div><h2>PagerDuty verification</h2></div><div class="form-stack">
+          <label for="pd-secret">PAGERDUTY_WEBHOOK_SECRET <span id="secret-state" class="config-state"></span></label>
+          <input type="password" id="pd-secret" name="pagerduty_webhook_secret" autocomplete="new-password" placeholder="Enter your signing secret" maxlength="8192">
+          <label class="check"><input id="clear-secret" type="checkbox">Clear saved signing secret</label>
+        </div></section>
+        <div class="settings-footer"><button type="submit" class="primary" id="save-settings" disabled>Save settings</button></div>
+      </form>
+      {% endif %}
+    </main>
+  </div>
+  <div id="row-menu" class="row-menu" role="menu" aria-label="Row actions" hidden></div>
+  <dialog id="modal"><form id="modal-form"><div class="modal-heading"><div><p class="eyebrow">CASE WEBHOOK</p><h2 id="modal-title"></h2></div><button id="close-modal" type="button" class="icon-button" aria-label="Close dialog">×</button></div><div id="modal-fields" class="form-stack"></div><div id="modal-error" class="notice error" role="alert" hidden></div><div class="modal-footer"><button id="cancel-modal" type="button" class="secondary">Cancel</button><button id="modal-submit" class="primary" type="submit">Save changes</button></div></form></dialog>
+</body>
+</html>
