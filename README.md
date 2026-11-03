@@ -113,7 +113,7 @@ Slack 通知在数据库事务提交后发送，失败最多尝试 15 次，退�
 请求示例：
 
 ```json
-{"event":{"data":{"title":"Case 02083291 - Medium - HEFEI LCFC INFORMATION TECHNOLOGY CO LTD","self":"https://api.pagerduty.com/incidents/Q235TB5V667RKR"}}}
+{"event":{"data":{"title":"Case 01590054 - Medium - Customer's Company","self":"https://api.pagerduty.com/incidents/Q235TB5V667RKR"}}}
 ```
 
 模拟请求（以下变量仅在发送请求的终端使用，URL 必须与 Settings 中保存的完整 URL 一致，Secret 使用原始值）：
@@ -121,7 +121,7 @@ Slack 通知在数据库事务提交后发送，失败最多尝试 15 次，退�
 ```bash
 WEBHOOK_URL='http://<server>/webhooks/pd/v3/<saved-suffix>'
 SIGNING_SECRET='<PagerDuty Webhook Signing Secret>'
-payload='{"event":{"data":{"title":"Case 02083291 - Medium - HEFEI LCFC INFORMATION TECHNOLOGY CO LTD","self":"https://api.pagerduty.com/incidents/Q235TB5V667RKR"}}}'
+payload='{"event":{"data":{"title":"Case 01590054 - Medium - Customer's Company","self":"https://api.pagerduty.com/incidents/Q235TB5V667RKR"}}}'
 signature="$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$SIGNING_SECRET" -hex | awk '{print $NF}')"
 
 curl -X POST \
@@ -144,7 +144,7 @@ Slack 工作流收到的 JSON 示例：
 
 ```json
 {
-  "message": "Case: 02083291\nPriority: Medium\nSubject: controller plane组件流量分析\nAccount: HEFEI LCFC INFORMATION TECHNOLOGY CO LTD\nProduct: SUSE Rancher Prime: RKE2 Other x86_64",
+  "message": "Case: 01590054\nPriority: Medium\nSubject: Kubernetes 问题排查\nAccount: Customer's Company\nProduct: SUSE Rancher Prime: RKE2 Other x86_64",
   "url": "https://suse.lightning.force.com/lightning/r/Case/500bG000013TW7F/view",
   "uid": "U123456789"
 }
@@ -155,9 +155,9 @@ Slack 工作流收到的 JSON 示例：
 未配置 API Token、请求失败、响应字段缺失或邮件解析失败时，回退到原 title 提取信息。title 需符合 `Case <ID> - <Priority> - <Account>` 格式；无法提取这些字段时返回 `400`，不分配 Case。提取成功后按原队列分配，形成以下 `message`，`url` 使用 `https://suse.lightning.force.com`，`uid` 使用轮询结果：
 
 ```text
-Case: 02083291
+Case: 01590054
 Priority: Medium
-Account: HEFEI LCFC INFORMATION TECHNOLOGY CO LTD
+Account: Customer's Company
 ```
 
 
